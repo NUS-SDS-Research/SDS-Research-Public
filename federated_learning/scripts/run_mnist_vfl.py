@@ -28,6 +28,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from configs.vfl_config import VFLConfig, MNISTConfig
 from src.datasets.dataloader_factory import VFLDataLoaderFactory
@@ -89,6 +90,12 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     opt_b   = torch.optim.Adam(bottom_b.parameters(), lr=config.learning_rate)
     opt_top = torch.optim.Adam(top_model.parameters(), lr=config.learning_rate)
 
+    # T1: CosineAnnealingLR smoothly decays LR over all rounds, preventing the
+    #     sharp round 1→2 accuracy drop caused by constant LR overshooting.
+    sched_a   = CosineAnnealingLR(opt_a,   T_max=config.num_rounds, eta_min=1e-5)
+    sched_b   = CosineAnnealingLR(opt_b,   T_max=config.num_rounds, eta_min=1e-5)
+    sched_top = CosineAnnealingLR(opt_top, T_max=config.num_rounds, eta_min=1e-5)
+
     # ── Trainer ─────────────────────────────────────────────────────────
     trainer = VFLTrainer(
         bottom_model_a=bottom_a,
@@ -103,16 +110,23 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     )
 
     # ── Training loop ───────────────────────────────────────────────────
+    val_metrics: dict = {}
     for rnd in range(1, config.num_rounds + 1):
         train_metrics = trainer.train_one_epoch(loader_a, loader_b, loader_server)
         val_metrics   = trainer.evaluate(val_a, val_b, val_server)
+
+        # Step LR schedulers at the end of each round (T1)
+        sched_a.step()
+        sched_b.step()
+        sched_top.step()
 
         print(
             f"[Round {rnd:>3}] "
             f"train loss={train_metrics['loss']:.4f}  "
             f"train acc={train_metrics['accuracy']:.4f} | "
             f"val loss={val_metrics['loss']:.4f}  "
-            f"val acc={val_metrics['accuracy']:.4f}"
+            f"val acc={val_metrics['accuracy']:.4f}  "
+            f"lr={sched_top.get_last_lr()[0]:.2e}"
         )
 
     print("\nTraining complete.")

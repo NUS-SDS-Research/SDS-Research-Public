@@ -93,22 +93,28 @@ class VFLDataLoaderFactory:
         batch_size: Optional[int] = None,
         num_workers: int = 0,
         seed: int = 42,
-    ) -> tuple[DataLoader, DataLoader, DataLoader]:
+    ) -> tuple[
+        tuple[DataLoader, DataLoader, DataLoader],
+        tuple[DataLoader, DataLoader, DataLoader],
+    ]:
         """
         Build aligned DataLoaders for the CiferAI vertical split.
 
-        Note: CiferVerticalDataset.build_aligned_pair() already applies
-        train/test splitting internally; this factory always returns train loaders.
-
         Returns
         -------
-        (loader_a, loader_b, loader_server)
+        (train_loaders, val_loaders)
+            Each is a 3-tuple (loader_a, loader_b, loader_server).
+            Train loaders shuffle with drop_last=True.
+            Val loaders are sequential with drop_last=False.
         """
-        ds_a, ds_b, ds_server = CiferVerticalDataset.build_aligned_pair(config)
+        (ds_a_train, ds_b_train, ds_server_train), (ds_a_val, ds_b_val, ds_server_val) = (
+            CiferVerticalDataset.build_aligned_pair(config)
+        )
         bs = batch_size if batch_size is not None else config.batch_size
-        return tuple(
+
+        train_loaders = tuple(
             VFLDataLoaderFactory._make_aligned_loaders(
-                datasets=[ds_a, ds_b, ds_server],
+                datasets=[ds_a_train, ds_b_train, ds_server_train],
                 batch_size=bs,
                 shuffle=True,
                 seed=seed,
@@ -116,6 +122,17 @@ class VFLDataLoaderFactory:
                 drop_last=True,
             )
         )
+        val_loaders = tuple(
+            VFLDataLoaderFactory._make_aligned_loaders(
+                datasets=[ds_a_val, ds_b_val, ds_server_val],
+                batch_size=bs,
+                shuffle=False,
+                seed=seed,
+                num_workers=num_workers,
+                drop_last=False,
+            )
+        )
+        return train_loaders, val_loaders
 
     # ------------------------------------------------------------------
     # Core alignment mechanism

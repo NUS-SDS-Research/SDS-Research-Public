@@ -43,23 +43,26 @@ from configs.vfl_config import CiferConfig
 # ---------------------------------------------------------------------------
 
 def _load_raw_dataframe(config: CiferConfig) -> pd.DataFrame:
-    """Download (or use cache) and return a stratified subsample as DataFrame."""
-    hf_dataset = load_dataset(config.dataset_id, split="train")
+    """Stream a subsample (or full dataset) from HuggingFace as a DataFrame.
 
-    if config.max_samples is not None and config.max_samples < len(hf_dataset):
-        # Stratified subsample preserving fraud ratio
-        df_full = hf_dataset.to_pandas()
-        df, _ = train_test_split(
-            df_full,
-            train_size=config.max_samples,
-            stratify=df_full[config.label_column],
-            random_state=config.random_state,
+    When max_samples is set, streams only the required rows (~30 MB) instead
+    of downloading all 14 HuggingFace parts (~1.8 GB).  The shuffle buffer
+    gives a random sample without loading the full dataset into memory.
+    """
+    if config.max_samples is not None:
+        hf_dataset = load_dataset(config.dataset_id, split="train", streaming=True)
+        hf_dataset = hf_dataset.shuffle(
+            seed=config.random_state,
+            buffer_size=min(10_000, config.max_samples),
         )
-        df = df.reset_index(drop=True)
+        hf_dataset = hf_dataset.take(config.max_samples)
+        df = pd.DataFrame(hf_dataset)
     else:
+        # User opted into the full 6.3 M-row dataset — download all parts
+        hf_dataset = load_dataset(config.dataset_id, split="train")
         df = hf_dataset.to_pandas()
 
-    return df
+    return df.reset_index(drop=True)
 
 
 def _frequency_encode(
@@ -174,56 +177,69 @@ class CiferVerticalDataset(Dataset):
     def build_aligned_pair(
         cls,
         config: CiferConfig,
-    ) -> tuple["CiferVerticalDataset", "CiferVerticalDataset", "CiferVerticalDataset"]:
+    ) -> tuple[
+        tuple["CiferVerticalDataset", "CiferVerticalDataset", "CiferVerticalDataset"],
+        tuple["CiferVerticalDataset", "CiferVerticalDataset", "CiferVerticalDataset"],
+    ]:
         """
         Load, encode, scale, and split the CiferAI dataset.
 
+        Encoders and scalers are fit on the training split only; the val split
+        is transformed with the same fitted objects to prevent data leakage.
+
         Returns
         -------
-        (train_a, train_b, train_server)
-            Three strictly index-aligned Dataset objects for training.
-            (Test datasets can be built similarly by passing a separate config.)
+        (train_datasets, val_datasets)
+            Each is a 3-tuple (ds_a, ds_b, ds_server) strictly index-aligned.
         """
         print("[CiferAI] Loading dataset from HuggingFace... (first run may take a moment)")
         df = _load_raw_dataframe(config)
 
-        # Train / test split (stratified on label)
-        df_train, _df_test = train_test_split(
+        # Train / val split (stratified on label)
+        df_train, df_val = train_test_split(
             df,
             train_size=config.train_split,
             stratify=df[config.label_column],
             random_state=config.random_state,
         )
         df_train = df_train.reset_index(drop=True)
+        df_val = df_val.reset_index(drop=True)
 
-        # Fit encoders on train
+        # Fit encoders on train only — then apply to both splits
         type_enc, orig_freq, dest_freq = _build_encoders(df_train, config)
-
-        # Encode both splits
         df_train_enc = _encode_dataframe(df_train, type_enc, orig_freq, dest_freq)
+        df_val_enc   = _encode_dataframe(df_val,   type_enc, orig_freq, dest_freq)
 
-        # Extract party column arrays
         a_cols = config.party_a_columns    # ["step", "nameOrig", "nameDest"]
         b_cols = config.party_b_columns    # ["type", "amount", ...]
 
-        # Fit scalers on train numeric columns (nameOrig/nameDest already float)
+        # Fit scalers on train; apply to both splits
         scaler_a, arr_a_train = _fit_scaler(df_train_enc, a_cols)
         scaler_b, arr_b_train = _fit_scaler(df_train_enc, b_cols)
+        arr_a_val = _apply_scaler(scaler_a, df_val_enc, a_cols)
+        arr_b_val = _apply_scaler(scaler_b, df_val_enc, b_cols)
 
         labels_train = df_train_enc[config.label_column].to_numpy(dtype=np.int64)
+        labels_val   = df_val_enc[config.label_column].to_numpy(dtype=np.int64)
 
         print(
-            f"[CiferAI] Loaded {len(df_train)} train samples | "
+            f"[CiferAI] Loaded {len(df_train)} train | {len(df_val)} val samples | "
             f"fraud rate: {labels_train.mean():.4f} | "
             f"Party A features: {arr_a_train.shape[1]}, "
             f"Party B features: {arr_b_train.shape[1]}"
         )
 
-        return (
+        train_datasets = (
             cls(features=arr_a_train, labels=None, party="A"),
             cls(features=arr_b_train, labels=None, party="B"),
             cls(features=None, labels=labels_train, party="server"),
         )
+        val_datasets = (
+            cls(features=arr_a_val, labels=None, party="A"),
+            cls(features=arr_b_val, labels=None, party="B"),
+            cls(features=None, labels=labels_val, party="server"),
+        )
+        return train_datasets, val_datasets
 
     # ------------------------------------------------------------------
     # Dataset protocol

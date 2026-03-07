@@ -63,7 +63,7 @@ class VFLConfig:
     hidden_dim: int = 256             # Bottom model hidden layer width
 
     # Training
-    num_rounds: int = 10              # Flower rounds to simulate
+    num_rounds: int = 25              # Flower rounds to simulate
     local_epochs: int = 1             # Epochs per Flower round (client-side)
     learning_rate: float = 1e-3
 
