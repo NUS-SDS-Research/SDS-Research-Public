@@ -41,6 +41,14 @@ class CiferConfig:
     batch_size: int = 256
     random_state: int = 42
 
+    # Minority class oversampling (random repetition of fraud rows).
+    # With ~0.1% fraud rate and max_samples=100k, only ~94 positive samples
+    # exist — far too few for the model to learn a fraud signal.
+    # oversample_target_ratio=0.1 repeats fraud rows until they are 10% of
+    # the training set (~8,800 fraud vs 80k non-fraud).
+    oversample_minority: bool = True
+    oversample_target_ratio: float = 0.1    # minority / (minority + majority)
+
 
 @dataclass
 class MNISTConfig:

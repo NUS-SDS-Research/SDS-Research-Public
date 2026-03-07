@@ -36,13 +36,33 @@ Why .detach().requires_grad_(True)?
                                to propagate dL/d_sent_emb further back into the
                                bottom model parameters.
 
-Hook with Opacus for Differential Privacy
------------
-The detach_for_transmission() method is the exact attachment point for
-Opacus differential privacy:
-    clipped = clip_embedding(local_emb.detach(), clip_norm=C)
-    noisy   = clipped + torch.randn_like(clipped) * sigma * C
+Privacy Model
+-------------
+This module sits at the privacy boundary of the VFL system.
+
+CURRENT (Epic 1 & 2) — Structural / Partitioned Privacy:
+  - Raw features are NEVER transmitted. Only the 128-dim embedding vector
+    crosses the simulated network boundary.
+  - Labels are held exclusively by the active party (server).
+    Passive parties receive only dL/d_embedding — not logits, loss values,
+    or top-model weights.
+  - Cross-party gradient isolation: Party A receives only grad_a = dL/d_emb_a;
+    it never sees grad_b. Confirmed by the test suite (test_no_cross_party_leakage).
+
+LIMITATION — No formal Differential Privacy:
+  Without noise injection, an adversary who intercepts the gradient stream
+  could attempt a gradient inversion attack (Zhu et al., NeurIPS 2019) to
+  approximately reconstruct the passive party's input features from the
+  gradients. This is the primary remaining privacy risk in the current system.
+
+PLANNED (Epic 3) — Opacus Differential Privacy:
+  detach_for_transmission() is the EXACT hook point for Opacus DP.
+  Replace the return statement with clip + Gaussian noise injection:
+    clipped  = clip_embedding(local_emb.detach(), clip_norm=C)
+    noisy    = clipped + torch.randn_like(clipped) * sigma * C
     sent_emb = noisy.requires_grad_(True)
+  This provides (ε, δ)-DP guarantees on the transmitted embeddings,
+  making gradient inversion attacks computationally infeasible.
 """
 from __future__ import annotations
 

@@ -128,6 +128,53 @@ def _fit_scaler(df: pd.DataFrame, columns: list[str]) -> tuple[StandardScaler, n
     return scaler, arr
 
 
+def _oversample_minority(
+    arr_a: np.ndarray,
+    arr_b: np.ndarray,
+    labels: np.ndarray,
+    target_ratio: float,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Randomly repeat minority-class (fraud, label=1) rows until the positive
+    class makes up ``target_ratio`` of the combined training set.
+
+    All three arrays are shuffled together so fraud samples are interleaved
+    throughout the epoch rather than clumped at the end.
+
+    Parameters
+    ----------
+    target_ratio : float
+        Desired minority/(minority+majority) ratio after oversampling.
+        E.g. 0.1 → 10 % of training rows are fraud.
+
+    Returns the three arrays with the same dtype and column ordering.
+    """
+    rng = np.random.default_rng(random_state)
+
+    pos_idx = np.where(labels == 1)[0]
+    n_pos_orig = len(pos_idx)
+    n_neg = int((labels == 0).sum())
+
+    # How many positive samples are needed to hit the target ratio?
+    n_pos_target = int(n_neg * target_ratio / (1.0 - target_ratio))
+    if n_pos_target <= n_pos_orig:
+        return arr_a, arr_b, labels     # already at or above target ratio
+
+    # Randomly sample extra fraud indices (with replacement)
+    extra_idx = rng.choice(pos_idx, size=n_pos_target - n_pos_orig, replace=True)
+
+    # Build the combined index and shuffle so fraud rows are spread evenly
+    all_idx = np.concatenate([np.arange(len(labels)), extra_idx])
+    rng.shuffle(all_idx)
+
+    print(
+        f"[CiferAI] Oversampled minority class: {n_pos_orig} → {n_pos_target} fraud rows "
+        f"({n_pos_target / (n_pos_target + n_neg) * 100:.1f}% of training set)"
+    )
+    return arr_a[all_idx], arr_b[all_idx], labels[all_idx]
+
+
 def _apply_scaler(scaler: StandardScaler, df: pd.DataFrame, columns: list[str]) -> np.ndarray:
     return scaler.transform(df[columns].to_numpy(dtype=np.float32))
 
@@ -228,6 +275,16 @@ class CiferVerticalDataset(Dataset):
             f"Party A features: {arr_a_train.shape[1]}, "
             f"Party B features: {arr_b_train.shape[1]}"
         )
+
+        # C1: oversample the minority fraud class so the model receives enough
+        # positive signal. Oversampling is applied to training data only;
+        # val data is never modified (real-world distribution must be preserved).
+        if getattr(config, "oversample_minority", False):
+            arr_a_train, arr_b_train, labels_train = _oversample_minority(
+                arr_a_train, arr_b_train, labels_train,
+                target_ratio=config.oversample_target_ratio,
+                random_state=config.random_state,
+            )
 
         train_datasets = (
             cls(features=arr_a_train, labels=None, party="A"),
