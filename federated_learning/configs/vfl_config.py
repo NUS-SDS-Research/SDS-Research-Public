@@ -49,6 +49,23 @@ class CiferConfig:
     oversample_minority: bool = True
     oversample_target_ratio: float = 0.1    # minority / (minority + majority)
 
+    # CiferAI-specific learning rate (M2).
+    # Lower than the MNIST default (1e-3) because the oversampled training
+    # distribution is much more sensitive to large gradient steps; using 1e-3
+    # causes limit-cycle oscillation between "predict all-fraud" and "predict
+    # no-fraud" states across rounds.
+    learning_rate: float = 1e-4
+
+    # Fraud decision threshold for inference (C2).
+    # The model is calibrated to the oversampled training distribution (10%
+    # fraud), but the real val set has only 0.12% fraud.  Increasing this
+    # threshold above 0.5 trades recall for precision — i.e. fewer false
+    # positives at the cost of missing some true fraud cases.
+    # Tune between 0.5 (high recall / low precision) and 0.9 (balanced F1).
+    # NOTE: reverted to 0.5 after Attempt 4 showed threshold=0.7 suppresses
+    # all detections when LR=1e-4 keeps fraud softmax probs in 0.5–0.7 range.
+    fraud_threshold: float = 0.5
+
 
 @dataclass
 class MNISTConfig:

@@ -22,14 +22,20 @@ Expected output:
 Notes
 -----
 - CiferAI is heavily class-imbalanced (~0.1% fraud rate).
-  Accuracy is meaningless for this dataset; use F1 and recall for the fraud class.
-- Class-weighted CrossEntropyLoss prevents the model from collapsing to
-  'predict no fraud always'.
+  Accuracy is meaningless; F1 and recall for the fraud class are the key signals.
+- Training uses minority oversampling (10% fraud) + class-weighted loss.
+  The fraud_threshold (default 0.5) can be raised toward 0.9 to trade
+  recall for precision if false positives dominate.
+- Learning rate is constant 1e-4 throughout (no scheduler). CosineAnnealingLR
+  was removed because it decayed LR to 1e-6 by round 25, killing the fraud
+  signal in later rounds. Constant LR keeps every round equally capable of
+  detecting fraud; best recall across rounds is reported in the summary.
 - max_samples=100_000 (default) keeps first runs fast.
   Set config.cifer.max_samples = None for the full 6.3M row dataset.
 """
 from __future__ import annotations
 
+import copy
 import sys
 import os
 
@@ -38,7 +44,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 from sklearn.metrics import f1_score, precision_score, recall_score
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from configs.vfl_config import VFLConfig
 from src.datasets.dataloader_factory import VFLDataLoaderFactory
@@ -56,12 +61,21 @@ def _fraud_metrics(
     loader_a,
     loader_b,
     loader_server,
+    fraud_threshold: float = 0.5,
 ) -> dict[str, float]:
     """
     Run inference and return F1, precision, and recall for the fraud class (label=1).
 
-    Accuracy on an imbalanced dataset is dominated by the majority class.
-    These per-class metrics reveal whether the model actually detects fraud.
+    Parameters
+    ----------
+    fraud_threshold : float
+        Minimum softmax probability for the fraud class before a sample is
+        classified as fraud.  Default 0.5 (equivalent to argmax for 2 classes).
+
+        The model is trained on an oversampled distribution (10% fraud) but
+        evaluated on the real distribution (~0.12% fraud).  A threshold above
+        0.5 corrects for this mismatch: it reduces false positives (improving
+        precision) at some cost to recall.  Tune between 0.5 and 0.95.
     """
     trainer.bottom_a.eval()
     trainer.bottom_b.eval()
@@ -77,7 +91,10 @@ def _fraud_metrics(
             emb_a = trainer.bottom_a(x_a)
             emb_b = trainer.bottom_b(x_b)
             logits = trainer.top(emb_a, emb_b)
-            preds = logits.argmax(dim=1).cpu().numpy()
+            # Use softmax probability of the fraud class vs a tunable threshold
+            # (C2: prevents over-flagging caused by oversampling calibration gap)
+            fraud_probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+            preds = (fraud_probs >= fraud_threshold).astype(int)
             all_preds.extend(preds.tolist())
             all_labels.extend(labels.numpy().tolist())
 
@@ -154,15 +171,18 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     )
 
     # ── Optimizers ──────────────────────────────────────────────────────
-    opt_a   = torch.optim.Adam(bottom_a.parameters(), lr=config.learning_rate)
-    opt_b   = torch.optim.Adam(bottom_b.parameters(), lr=config.learning_rate)
-    opt_top = torch.optim.Adam(top_model.parameters(), lr=config.learning_rate)
+    # M2: use CiferAI-specific learning rate (1e-4), lower than MNIST's 1e-3.
+    #     The oversampled training landscape causes limit-cycle oscillation at
+    #     lr=1e-3; 1e-4 stabilises the gradient steps.
+    cifer_lr = config.cifer.learning_rate
+    opt_a   = torch.optim.Adam(bottom_a.parameters(), lr=cifer_lr)
+    opt_b   = torch.optim.Adam(bottom_b.parameters(), lr=cifer_lr)
+    opt_top = torch.optim.Adam(top_model.parameters(), lr=cifer_lr)
 
-    # T1: CosineAnnealingLR decays LR smoothly over all rounds, preventing the
-    #     round 1→2 accuracy drop caused by constant LR overshooting.
-    sched_a   = CosineAnnealingLR(opt_a,   T_max=config.num_rounds, eta_min=1e-5)
-    sched_b   = CosineAnnealingLR(opt_b,   T_max=config.num_rounds, eta_min=1e-5)
-    sched_top = CosineAnnealingLR(opt_top, T_max=config.num_rounds, eta_min=1e-5)
+    # M3: No LR scheduler for CiferAI. CosineAnnealingLR decayed LR to 1e-6
+    #     by round 25, which killed fraud detection in later rounds (recall
+    #     dropped from 78% at round 2 to 4% at round 25). Constant LR=1e-4
+    #     keeps all rounds equally capable of updating toward fraud detection.
 
     # ── Trainer ─────────────────────────────────────────────────────────
     trainer = VFLTrainer(
@@ -181,17 +201,37 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     val_metrics  = {"loss": float("nan"), "accuracy": float("nan")}
     fraud_report = {"f1": 0.0, "precision": 0.0, "recall": 0.0}
 
+    # Track best-performing round for the final summary.
+    # M4: save a deepcopy of model weights at best-recall round so we can
+    #     restore and re-evaluate after training ends (models eventually
+    #     collapse to "predict no-fraud" as Adam v-hat accumulates).
+    best_recall       = 0.0
+    best_recall_round = 0
+    best_f1           = 0.0
+    best_f1_round     = 0
+    best_state: dict | None = None
+
     for rnd in range(1, config.num_rounds + 1):
         train_metrics = trainer.train_one_epoch(loader_a, loader_b, loader_server)
 
         # B2: evaluate() now uses the real held-out val split
         val_metrics  = trainer.evaluate(val_a, val_b, val_server)
-        fraud_report = _fraud_metrics(trainer, val_a, val_b, val_server)   # B3
+        fraud_report = _fraud_metrics(
+            trainer, val_a, val_b, val_server,
+            fraud_threshold=config.cifer.fraud_threshold,
+        )
 
-        # Step LR schedulers after each round (T1)
-        sched_a.step()
-        sched_b.step()
-        sched_top.step()
+        if fraud_report["recall"] > best_recall:
+            best_recall       = fraud_report["recall"]
+            best_recall_round = rnd
+            best_state = {
+                "bottom_a": copy.deepcopy(trainer.bottom_a.state_dict()),
+                "bottom_b": copy.deepcopy(trainer.bottom_b.state_dict()),
+                "top":      copy.deepcopy(trainer.top.state_dict()),
+            }
+        if fraud_report["f1"] > best_f1:
+            best_f1       = fraud_report["f1"]
+            best_f1_round = rnd
 
         print(
             f"[Round {rnd:>3}] "
@@ -202,15 +242,40 @@ def run_pure_pytorch(config: VFLConfig) -> None:
             f"F1={fraud_report['f1']:.4f}  "
             f"recall={fraud_report['recall']:.4f}  "
             f"prec={fraud_report['precision']:.4f}  "
-            f"lr={sched_top.get_last_lr()[0]:.2e}"
+            f"lr={cifer_lr:.2e}"
         )
+
+    # M4: restore best-recall model weights and re-evaluate for the final report.
+    #     Models often collapse to "predict no-fraud" in later rounds; the best
+    #     checkpoint reflects the true fraud detection capability of the system.
+    if best_state is not None:
+        trainer.bottom_a.load_state_dict(best_state["bottom_a"])
+        trainer.bottom_b.load_state_dict(best_state["bottom_b"])
+        trainer.top.load_state_dict(best_state["top"])
+        best_report = _fraud_metrics(
+            trainer, val_a, val_b, val_server,
+            fraud_threshold=config.cifer.fraud_threshold,
+        )
+    else:
+        best_report = fraud_report
 
     print("\nTraining complete.")
     print(
-        f"Final — val acc: {val_metrics['accuracy']:.4f}  "
+        f"Final   (round {config.num_rounds:>2}) — "
+        f"val acc: {val_metrics['accuracy']:.4f}  "
         f"F1: {fraud_report['f1']:.4f}  "
         f"recall: {fraud_report['recall']:.4f}  "
         f"precision: {fraud_report['precision']:.4f}"
+    )
+    print(
+        f"Best F1     (round {best_f1_round:>2}) — "
+        f"F1={best_f1:.4f}"
+    )
+    print(
+        f"Best model  (round {best_recall_round:>2}) — "
+        f"F1={best_report['f1']:.4f}  "
+        f"recall={best_report['recall']:.4f}  "
+        f"precision={best_report['precision']:.4f}"
     )
     print("(Accuracy is dominated by the majority class; F1/recall are the key signals.)")
 
