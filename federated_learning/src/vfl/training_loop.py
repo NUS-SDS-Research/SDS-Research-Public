@@ -88,6 +88,10 @@ class VFLTrainer:
         Computation device.
     verbose : bool
         Show per-epoch tqdm progress bar if True.
+    dp_config : DPConfig or None
+        When provided and ``dp_config.enabled=True``, embeddings are clipped and
+        noised at the cut-layer before transmission (Epic 3). Provides (ε, δ)-DP
+        guarantees against gradient inversion attacks. ``None`` = no DP.
     """
 
     def __init__(
@@ -101,6 +105,7 @@ class VFLTrainer:
         criterion: nn.Module,
         device: torch.device,
         verbose: bool = True,
+        dp_config: Optional[object] = None,
     ) -> None:
         self.bottom_a = bottom_model_a.to(device)
         self.bottom_b = bottom_model_b.to(device)
@@ -112,6 +117,18 @@ class VFLTrainer:
         self.device = device
         self.verbose = verbose
         self._bridge = EmbeddingGradientBridge()
+        self._n_train: int = 0  # set in train_one_epoch; used for DP sample rate
+
+        # Epic 3 — DP setup
+        self._dp_config = dp_config
+        if dp_config is not None and getattr(dp_config, "enabled", False):
+            from src.vfl.dp_accountant import DPBudgetAccountant
+            self.dp_accountant: Optional[object] = DPBudgetAccountant(
+                noise_multiplier=dp_config.noise_multiplier,
+                delta=dp_config.delta,
+            )
+        else:
+            self.dp_accountant = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,6 +155,9 @@ class VFLTrainer:
         self.bottom_a.train()
         self.bottom_b.train()
         self.top.train()
+
+        # Store dataset size so _train_one_batch can compute DP sample rate
+        self._n_train = len(loader_a.dataset)
 
         total_loss = 0.0
         total_correct = 0
@@ -244,9 +264,18 @@ class VFLTrainer:
         local_emb_a = self.bottom_a(x_a)   # grad_fn connected to bottom_a params
         local_emb_b = self.bottom_b(x_b)   # grad_fn connected to bottom_b params
 
-        # ── Step 3: Detach for 'transmission' ──────────────────────────
-        sent_a = self._bridge.detach_for_transmission(local_emb_a)  # leaf node
-        sent_b = self._bridge.detach_for_transmission(local_emb_b)  # leaf node
+        # ── Step 3: Detach for 'transmission' (+ DP clip+noise if enabled) ──
+        dp = self._dp_config
+        clip  = dp.clip_norm         if (dp and dp.enabled) else None
+        sigma = dp.noise_multiplier  if (dp and dp.enabled) else None
+        sent_a = self._bridge.detach_for_transmission(local_emb_a, clip_norm=clip, noise_multiplier=sigma)
+        sent_b = self._bridge.detach_for_transmission(local_emb_b, clip_norm=clip, noise_multiplier=sigma)
+
+        # ── Epic 3: Increment DP privacy budget accountant ─────────────
+        if self.dp_accountant is not None and self._n_train > 0:
+            sample_rate = local_emb_a.size(0) / self._n_train
+            self.dp_accountant.step(sample_rate=sample_rate)  # party A noise
+            self.dp_accountant.step(sample_rate=sample_rate)  # party B noise
 
         # ── Steps 4 & 5: Active party forward + loss ───────────────────
         logits = self.top(sent_a, sent_b)

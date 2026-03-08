@@ -40,7 +40,7 @@ Privacy Model
 -------------
 This module sits at the privacy boundary of the VFL system.
 
-CURRENT (Epic 1 & 2) — Structural / Partitioned Privacy:
+CURRENT — Structural / Partitioned Privacy:
   - Raw features are NEVER transmitted. Only the 128-dim embedding vector
     crosses the simulated network boundary.
   - Labels are held exclusively by the active party (server).
@@ -55,14 +55,11 @@ LIMITATION — No formal Differential Privacy:
   approximately reconstruct the passive party's input features from the
   gradients. This is the primary remaining privacy risk in the current system.
 
-PLANNED (Epic 3) — Opacus Differential Privacy:
-  detach_for_transmission() is the EXACT hook point for Opacus DP.
-  Replace the return statement with clip + Gaussian noise injection:
-    clipped  = clip_embedding(local_emb.detach(), clip_norm=C)
-    noisy    = clipped + torch.randn_like(clipped) * sigma * C
-    sent_emb = noisy.requires_grad_(True)
-  This provides (ε, δ)-DP guarantees on the transmitted embeddings,
-  making gradient inversion attacks computationally infeasible.
+IMPLEMENTED — Opacus Differential Privacy:
+  detach_for_transmission(local_emb, clip_norm=C, noise_multiplier=σ)
+  clips each embedding row to L2 norm ≤ C, then adds Gaussian noise N(0,(σC)²).
+  Privacy budget (ε, δ) is tracked by DPBudgetAccountant (Opacus RDPAccountant).
+  Enable via VFLConfig.dp.enabled=True; see DPConfig in configs/vfl_config.py.
 """
 from __future__ import annotations
 
@@ -73,31 +70,59 @@ class EmbeddingGradientBridge:
     """Static helper methods implementing the VFL cut-layer gradient protocol."""
 
     @staticmethod
-    def detach_for_transmission(local_emb: torch.Tensor) -> torch.Tensor:
+    def detach_for_transmission(
+        local_emb: torch.Tensor,
+        clip_norm: float | None = None,
+        noise_multiplier: float | None = None,
+    ) -> torch.Tensor:
         """
         Prepare a local embedding for 'transmission' to the active party.
 
         Creates a new leaf tensor with the same values as ``local_emb`` but
         detached from the computation graph, while still accumulating gradients.
 
+        When ``clip_norm`` is supplied (Epic 3 — DP mode), the embedding is
+        additionally clipped and noised before transmission:
+
+          1. Per-sample L2-norm clipping: each row is scaled so its norm ≤ C.
+             This bounds the *sensitivity* of the transmitted value.
+          2. Gaussian noise N(0, (σ·C)²) is added to every element.
+             This masks individual sample information.
+
         Parameters
         ----------
         local_emb : Tensor
             Raw output of the passive party's bottom model. Must have
             ``requires_grad=True`` (i.e. bottom model must be in train mode).
+        clip_norm : float or None
+            C — maximum L2 norm allowed per embedding row.
+            Pass ``None`` (default) to skip clipping and noise (no-DP mode).
+        noise_multiplier : float or None
+            σ — noise scale relative to clip_norm.
+            noise_std = noise_multiplier * clip_norm.
+            Only used when ``clip_norm`` is also provided.
 
         Returns
         -------
         sent_emb : Tensor
             Detached leaf tensor. Shape identical to ``local_emb``.
             ``sent_emb.grad_fn`` is None; ``sent_emb.requires_grad`` is True.
-
-        Notes
-        -----
-        This is the Opacus hook point: replace the returned tensor
-        with a clipped + noisy version before returning it.
+            In DP mode, values are clipped and noised.
         """
-        return local_emb.detach().requires_grad_(True)
+        sent = local_emb.detach()
+
+        if clip_norm is not None:
+            # Per-sample L2 norm clipping: divide each row by max(1, ||row||/C)
+            norms = sent.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            scale = (clip_norm / norms).clamp(max=1.0)
+            sent = sent * scale
+
+            if noise_multiplier is not None:
+                # Gaussian mechanism: noise_std = σ * C
+                noise_std = noise_multiplier * clip_norm
+                sent = sent + torch.randn_like(sent) * noise_std
+
+        return sent.requires_grad_(True)
 
     @staticmethod
     def extract_gradient(sent_emb: torch.Tensor) -> torch.Tensor:
