@@ -185,6 +185,8 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     #     keeps all rounds equally capable of updating toward fraud detection.
 
     # ── Trainer ─────────────────────────────────────────────────────────
+    # Epic 3: pass dp_config so the trainer wires up DP clip+noise and
+    #         the privacy budget accountant when config.dp.enabled=True.
     trainer = VFLTrainer(
         bottom_model_a=bottom_a,
         bottom_model_b=bottom_b,
@@ -195,7 +197,16 @@ def run_pure_pytorch(config: VFLConfig) -> None:
         criterion=torch.nn.CrossEntropyLoss(weight=class_weight),   # B3
         device=device,
         verbose=True,
+        dp_config=config.dp,
     )
+
+    if config.dp.enabled:
+        print(
+            f"[DP] Differential Privacy ENABLED — "
+            f"clip_norm={config.dp.clip_norm}, "
+            f"noise_multiplier={config.dp.noise_multiplier}, "
+            f"δ={config.dp.delta}"
+        )
 
     # ── Training loop ───────────────────────────────────────────────────
     val_metrics  = {"loss": float("nan"), "accuracy": float("nan")}
@@ -278,6 +289,16 @@ def run_pure_pytorch(config: VFLConfig) -> None:
         f"precision={best_report['precision']:.4f}"
     )
     print("(Accuracy is dominated by the majority class; F1/recall are the key signals.)")
+
+    # Epic 3: report privacy budget if DP was enabled
+    if trainer.dp_accountant is not None:
+        eps = trainer.dp_accountant.get_epsilon()
+        print(
+            f"Privacy budget — ε={eps:.4f} at δ={config.dp.delta}  "
+            f"(clip_norm={config.dp.clip_norm}, "
+            f"noise_multiplier={config.dp.noise_multiplier}, "
+            f"rounds={config.num_rounds})"
+        )
 
 
 if __name__ == "__main__":
