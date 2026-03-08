@@ -10,6 +10,27 @@ from typing import Literal, Optional
 
 
 @dataclass
+class DPConfig:
+    """
+    Differential Privacy configuration for VFL embedding-level noise injection.
+
+    When enabled, every embedding transmitted across the VFL cut-layer is:
+      1. Clipped to have L2 norm ≤ clip_norm  (bounds sensitivity)
+      2. Perturbed with Gaussian noise N(0, (noise_multiplier * clip_norm)²)
+
+    This defends against gradient inversion attacks (Zhu et al., NeurIPS 2019)
+    that attempt to reconstruct passive party features from the embedding stream.
+
+    Privacy accounting is handled by DPBudgetAccountant (Opacus RDPAccountant)
+    and provides (ε, δ)-DP guarantees over the full training run.
+    """
+    enabled: bool = False
+    clip_norm: float = 1.0         # C: maximum L2 norm per embedding row
+    noise_multiplier: float = 1.0  # σ: noise_std = noise_multiplier * clip_norm
+    delta: float = 1e-5            # δ: failure probability for (ε, δ)-DP
+
+
+@dataclass
 class CiferConfig:
     """Configuration for CiferAI fraud detection dataset."""
 
@@ -102,6 +123,9 @@ class VFLConfig:
     # Dataset-specific configs
     cifer: CiferConfig = field(default_factory=CiferConfig)
     mnist: MNISTConfig = field(default_factory=MNISTConfig)
+
+    # Differential Privacy (Epic 3)
+    dp: DPConfig = field(default_factory=DPConfig)
 
     def num_classes(self) -> int:
         """Returns number of output classes for the selected dataset."""

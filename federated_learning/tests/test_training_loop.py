@@ -253,3 +253,115 @@ class TestVFLTrainer:
                 assert param.grad is None, (
                     "evaluate() must not populate gradients (torch.no_grad missing?)"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Epic 3 — Differential Privacy
+# ---------------------------------------------------------------------------
+
+class TestDifferentialPrivacy:
+    """Tests for embedding-level DP at the VFL cut-layer (Epic 3)."""
+
+    def test_dp_disabled_no_change(self):
+        """Without clip_norm, detach_for_transmission returns identical values."""
+        from src.vfl.gradient_bridge import EmbeddingGradientBridge
+
+        model = _make_simple_bottom_model(4, 16)
+        model.train()
+        x = torch.randn(8, 4)
+        local_emb = model(x)
+
+        sent = EmbeddingGradientBridge.detach_for_transmission(local_emb)
+
+        assert torch.allclose(sent, local_emb.detach()), (
+            "With no DP args, sent_emb values must exactly match local_emb"
+        )
+        assert sent.grad_fn is None
+        assert sent.requires_grad
+
+    def test_dp_norm_clipping(self):
+        """After clipping, every embedding row must have L2 norm ≤ clip_norm."""
+        from src.vfl.gradient_bridge import EmbeddingGradientBridge
+
+        torch.manual_seed(0)
+        model = _make_simple_bottom_model(4, 32)
+        model.train()
+        x = torch.randn(16, 4) * 10   # large values to ensure some norms exceed clip_norm
+        local_emb = model(x)
+
+        clip_norm = 0.5
+        sent = EmbeddingGradientBridge.detach_for_transmission(
+            local_emb, clip_norm=clip_norm, noise_multiplier=None
+        )
+
+        row_norms = sent.norm(dim=1)
+        assert (row_norms <= clip_norm + 1e-5).all(), (
+            f"All row norms must be ≤ clip_norm={clip_norm}. "
+            f"Max found: {row_norms.max().item():.6f}"
+        )
+
+    def test_dp_noise_added(self):
+        """With noise_multiplier > 0, sent_emb must differ from clipped local_emb."""
+        from src.vfl.gradient_bridge import EmbeddingGradientBridge
+
+        model = _make_simple_bottom_model(4, 16)
+        model.train()
+        x = torch.randn(8, 4)
+
+        # Run 5 times to rule out the astronomically unlikely case of zero noise
+        for seed in range(5):
+            torch.manual_seed(seed)
+            local_emb = model(x)
+            sent = EmbeddingGradientBridge.detach_for_transmission(
+                local_emb, clip_norm=1.0, noise_multiplier=1.0
+            )
+            if not torch.allclose(sent, local_emb.detach().clamp(max=1.0)):
+                return  # noise confirmed
+        pytest.fail("Noise was not added in any of 5 attempts — check noise injection")
+
+    def test_dp_trainer_accountant_increments(self):
+        """
+        When DPConfig.enabled=True, training must increment the accountant and
+        get_epsilon() must return a finite value.
+        """
+        from src.models.bottom_models import TabularBottomModel
+        from src.models.top_model import VFLTopModel
+        from src.vfl.training_loop import VFLTrainer
+        from configs.vfl_config import DPConfig
+
+        dim_a, dim_b, emb_dim = 4, 3, 16
+        bottom_a = TabularBottomModel(input_dim=dim_a, embedding_dim=emb_dim, hidden_dim=32)
+        bottom_b = TabularBottomModel(input_dim=dim_b, embedding_dim=emb_dim, hidden_dim=32)
+        top = VFLTopModel(embedding_dim=emb_dim, num_parties=2, num_classes=2)
+
+        dp_cfg = DPConfig(enabled=True, clip_norm=1.0, noise_multiplier=1.1, delta=1e-5)
+
+        trainer = VFLTrainer(
+            bottom_model_a=bottom_a,
+            bottom_model_b=bottom_b,
+            top_model=top,
+            optimizer_a=torch.optim.Adam(bottom_a.parameters(), lr=1e-3),
+            optimizer_b=torch.optim.Adam(bottom_b.parameters(), lr=1e-3),
+            optimizer_top=torch.optim.Adam(top.parameters(), lr=1e-3),
+            criterion=nn.CrossEntropyLoss(),
+            device=torch.device("cpu"),
+            verbose=False,
+            dp_config=dp_cfg,
+        )
+
+        assert trainer.dp_accountant is not None, "dp_accountant must be initialised when DP is enabled"
+
+        n = 64
+        la = DataLoader(torch.randn(n, dim_a), batch_size=32, drop_last=True)
+        lb = DataLoader(torch.randn(n, dim_b), batch_size=32, drop_last=True)
+        ls = DataLoader(torch.randint(0, 2, (n,)), batch_size=32, drop_last=True)
+
+        trainer.train_one_epoch(la, lb, ls)
+
+        assert trainer.dp_accountant.steps > 0, (
+            "dp_accountant.steps must be > 0 after one training epoch"
+        )
+        eps = trainer.dp_accountant.get_epsilon()
+        assert eps < float("inf"), (
+            f"get_epsilon() returned inf after training — accountant may not have been stepped"
+        )
