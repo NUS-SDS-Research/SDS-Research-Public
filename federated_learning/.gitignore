@@ -16,3 +16,9 @@ __pycache__/
 
 # Claude Prompt Engineering files
 .claude/*
+
+# MLflow — experiment tracking artefacts
+mlruns/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
