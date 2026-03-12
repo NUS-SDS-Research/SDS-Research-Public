@@ -22,3 +22,9 @@ mlruns/
 mlflow.db
 mlflow.db-shm
 mlflow.db-wal
+
+# Dagster — local dev storage
+.tmp_dagster_home*/
+dagster.db
+dagster.db-shm
+dagster.db-wal
