@@ -1,6 +1,6 @@
 # Federated Learning as a Service (FLaaS)
 
-A research implementation of **Vertical Federated Learning (VFL)** built across six incremental epics — from raw data engineering through to a production-grade Dagster pipeline with differential privacy, experiment tracking, and LangGraph orchestration.
+A research implementation of **Vertical Federated Learning (VFL)** built across six incremental stages — from raw data engineering through to a production-grade Dagster pipeline with differential privacy, experiment tracking, and LangGraph orchestration.
 
 ---
 
