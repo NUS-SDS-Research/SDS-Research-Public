@@ -51,7 +51,7 @@ import copy
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import mlflow
 import mlflow.pytorch
@@ -141,8 +141,8 @@ def run_pure_pytorch(config: VFLConfig) -> None:
     # Use file-based backend (mlruns/) anchored to the project root.
     # This avoids the SQLite backend that triggers MLflow's auth middleware.
     # View runs with: mlflow ui --backend-store-uri ./mlruns
-    _project_root = os.path.join(os.path.dirname(__file__), "..")
-    mlflow.set_tracking_uri(os.path.join(_project_root, "mlruns"))
+    _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    mlflow.set_tracking_uri("file:///"  + os.path.join(_project_root, "mlruns").replace("\\", "/"))
     mlflow.set_experiment("VFL-CiferAI")
     run_name = (
         f"cifer-dp{'on' if config.dp.enabled else 'off'}"
@@ -373,9 +373,11 @@ def run_pure_pytorch(config: VFLConfig) -> None:
         })
 
         # log best-recall checkpoint as model artefacts
-        mlflow.pytorch.log_model(trainer.top,      "top_model")
-        mlflow.pytorch.log_model(trainer.bottom_a, "bottom_model_a")
-        mlflow.pytorch.log_model(trainer.bottom_b, "bottom_model_b")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, model in [("top_model", trainer.top), ("bottom_model_a", trainer.bottom_a), ("bottom_model_b", trainer.bottom_b)]:
+                path = os.path.join(tmp, f"{name}.pt")
+                torch.save(model.state_dict(), path)
+                mlflow.log_artifact(path)
 
         print(f"[MLflow] Run complete — experiment: VFL-CiferAI  name: {run_name}")
 
