@@ -1,4 +1,4 @@
-## SDS Workshops 25/26
+## SDS Reseach
 
 Welcome! This public repository hosts research projects conducted by the research members of the Statistics and Data Science Society. The projects have been segmented by academic years and you’ll find the relevant code, data and reports for each of the projects undertaken. Viewers are encouraged to watch or star this repo to stay updated as new projects will continue to be added.
 
