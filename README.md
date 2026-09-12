@@ -15,13 +15,13 @@ Each project has its own directory with a consistent structure:
 ```text
 (AY X)
     ├──(SEM X) PROJECT_NAME
-    ├── DATA_FOLDER
-    │   └── DATA_SHEETS
-    ├── MAIN_CODE_FILE
-    ├── OTHER_SCRIPTS
-    ├── requirements.txt
-    ├── Report.pdf
-    └── README.md
+        ├── DATA_FOLDER
+        │   └── DATA_SHEETS
+        ├── MAIN_CODE_FILE
+        ├── OTHER_SCRIPTS
+        ├── requirements.txt
+        ├── Report.pdf
+        └── README.md
 ```
 
 ## Attribution
