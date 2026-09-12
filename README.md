@@ -13,7 +13,8 @@ Welcome! This public repository hosts research projects conducted by the researc
 Each project has its own directory with a consistent structure:
 
 ```text
-(AY X SEM X) PROJECT_NAME
+(AY X)
+    ├──(SEM X) PROJECT_NAME
     ├── DATA_FOLDER
     │   └── DATA_SHEETS
     ├── MAIN_CODE_FILE
